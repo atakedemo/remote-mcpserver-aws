@@ -68,6 +68,10 @@ export class RemoteMcpServerStack extends cdk.Stack {
     const dcrResource = api.root.addResource('dcr');
     dcrResource.addMethod('POST', new apigateway.LambdaIntegration(mcpHandler));
 
+    // トークンエンドポイント
+    const tokenResource = api.root.addResource('token');
+    tokenResource.addMethod('POST', new apigateway.LambdaIntegration(mcpHandler));
+
     // クライアント管理エンドポイント
     const clientsResource = api.root.addResource('clients');
     const clientResource = clientsResource.addResource('{clientId}');

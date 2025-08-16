@@ -19,6 +19,7 @@ remote-mcpserver-aws/
 │   ├── 📄 mcp-handler.ts            # MCPプロトコル処理
 │   ├── 📄 dcr-handler.ts            # DCR認可処理
 │   ├── 📄 jwt-verifier.ts           # JWT検証・生成
+│   ├── 📄 token-handler.ts          # OAuth2.0トークン処理
 │   └── 📄 client-handler.ts         # クライアント管理
 │
 ├── 📁 test/                         # テストファイル
@@ -26,7 +27,8 @@ remote-mcpserver-aws/
 │
 ├── 📁 scripts/                      # デプロイ・テストスクリプト
 │   ├── 📄 deploy.sh                 # デプロイスクリプト
-│   └── 📄 test-api.sh               # APIテストスクリプト
+│   ├── 📄 test-api.sh               # APIテストスクリプト
+│   └── 📄 test-mcp-registration.sh  # MCP登録テストスクリプト
 │
 ├── 📁 doc/                          # ドキュメント
 │   └── 📄 architecture.md           # 詳細な構築手順
@@ -73,6 +75,10 @@ remote-mcpserver-aws/
   - JWTトークンの検証と生成
   - セキュリティ設定
   - 環境変数からのシークレット取得
+- **`token-handler.ts`**: OAuth2.0トークン処理
+  - OAuth2.0 client_credentials grant
+  - Basic認証によるクライアント認証
+  - JWTトークンの生成と返却
 - **`client-handler.ts`**: クライアント管理
   - クライアント情報の取得・削除
   - DynamoDB操作
@@ -94,6 +100,10 @@ remote-mcpserver-aws/
   - エンドポイントのテスト
   - クライアント登録・削除のテスト
   - jqを使用したJSONレスポンス解析
+- **`test-mcp-registration.sh`**: MCP登録テストスクリプト
+  - クライアント登録からMCP接続までの完全なフロー
+  - Claude Desktop/Cursor設定例の自動生成
+  - JWTトークンの取得と検証
 
 #### `doc/` - ドキュメント
 - **`architecture.md`**: 詳細な構築手順
@@ -317,6 +327,10 @@ export class RemoteMcpServerStack extends cdk.Stack {
     const dcrResource = api.root.addResource('dcr');
     dcrResource.addMethod('POST', new apigateway.LambdaIntegration(mcpHandler));
 
+    // トークンエンドポイント
+    const tokenResource = api.root.addResource('token');
+    tokenResource.addMethod('POST', new apigateway.LambdaIntegration(mcpHandler));
+
     // クライアント管理エンドポイント
     const clientsResource = api.root.addResource('clients');
     const clientResource = clientsResource.addResource('{clientId}');
@@ -342,6 +356,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { McpHandler } from './mcp-handler';
 import { DcrHandler } from './dcr-handler';
 import { ClientHandler } from './client-handler';
+import { TokenHandler } from './token-handler';
 
 export const handler = async (
   event: APIGatewayProxyEvent
@@ -355,6 +370,8 @@ export const handler = async (
       return await McpHandler.handle(event);
     } else if (path === '/dcr' && method === 'POST') {
       return await DcrHandler.handle(event);
+    } else if (path === '/token' && method === 'POST') {
+      return await TokenHandler.handle(event);
     } else if (path.startsWith('/clients/') && method === 'GET') {
       return await ClientHandler.get(event);
     } else if (path.startsWith('/clients/') && method === 'DELETE') {
@@ -582,7 +599,94 @@ export class JwtVerifier {
 }
 ```
 
-### 3.5 クライアント管理ハンドラー
+### 3.5 トークンハンドラー
+
+```typescript
+// lambda/token-handler.ts
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { JwtVerifier } from './jwt-verifier';
+
+const dynamoClient = new DynamoDBClient({});
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+
+export class TokenHandler {
+  static async handle(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+    try {
+      const authHeader = event.headers.Authorization || event.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Basic ')) {
+        return {
+          statusCode: 401,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ error: 'Unauthorized' }),
+        };
+      }
+
+      // Basic認証のデコード
+      const credentials = Buffer.from(authHeader.substring(6), 'base64').toString();
+      const [clientId, clientSecret] = credentials.split(':');
+
+      // クライアント認証
+      const client = await this.authenticateClient(clientId, clientSecret);
+      if (!client) {
+        return {
+          statusCode: 401,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ error: 'Invalid credentials' }),
+        };
+      }
+
+      // JWTトークンを生成
+      const token = JwtVerifier.generateToken({
+        client_id: clientId,
+        scope: client.scope || '',
+        exp: Math.floor(Date.now() / 1000) + 3600, // 1時間
+      });
+
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          access_token: token,
+          token_type: 'Bearer',
+          expires_in: 3600,
+          scope: client.scope || '',
+        }),
+      };
+    } catch (error) {
+      console.error('Token handler error:', error);
+      return {
+        statusCode: 500,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: 'Internal Server Error' }),
+      };
+    }
+  }
+
+  private static async authenticateClient(clientId: string, clientSecret: string) {
+    try {
+      const result = await docClient.send(
+        new GetCommand({
+          TableName: process.env.CLIENT_TABLE_NAME,
+          Key: { clientId },
+        })
+      );
+
+      if (!result.Item || result.Item.clientSecret !== clientSecret) {
+        return null;
+      }
+
+      return result.Item;
+    } catch (error) {
+      console.error('Error authenticating client:', error);
+      return null;
+    }
+  }
+}
+```
+
+### 3.6 クライアント管理ハンドラー
 
 ```typescript
 // lambda/client-handler.ts
@@ -673,27 +777,131 @@ export class ClientHandler {
 }
 ```
 
-## 4. デプロイ手順
+## 4. Claude DesktopとCursorへのMCP登録方法
 
-### 4.1 依存関係のインストール
+### 4.1 Claude Desktopへの登録
+
+#### 4.1.1 クライアント登録
+
+```bash
+curl -X POST https://your-api-gateway-url/dcr \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Claude Desktop MCP Client",
+    "client_uri": "https://claude.ai",
+    "grant_types": ["client_credentials"],
+    "token_endpoint_auth_method": "client_secret_basic"
+  }'
+```
+
+#### 4.1.2 JWTトークン取得
+
+```bash
+# Basic認証のヘッダーを作成
+BASIC_AUTH=$(echo -n "$CLIENT_ID:$CLIENT_SECRET" | base64)
+
+curl -X POST https://your-api-gateway-url/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -H "Authorization: Basic $BASIC_AUTH" \
+  -d "grant_type=client_credentials"
+```
+
+#### 4.1.3 Claude Desktop設定ファイル
+
+**macOS:**
+```bash
+mkdir -p ~/Library/Application\ Support/Claude/
+```
+
+**設定ファイル (`claude_desktop_config.toml`):**
+```toml
+[mcpServers.aws-remote-mcp]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-cli", "https://your-api-gateway-url/mcp"]
+env = { JWT_TOKEN = "YOUR_JWT_TOKEN" }
+
+[mcpServers.aws-remote-mcp.auth]
+type = "bearer"
+token = "YOUR_JWT_TOKEN"
+```
+
+### 4.2 Cursorへの登録
+
+#### 4.2.1 クライアント登録
+
+```bash
+curl -X POST https://your-api-gateway-url/dcr \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Cursor MCP Client",
+    "client_uri": "https://cursor.sh",
+    "grant_types": ["client_credentials"],
+    "token_endpoint_auth_method": "client_secret_basic"
+  }'
+```
+
+#### 4.2.2 Cursor設定ファイル
+
+**macOS:**
+```bash
+mkdir -p ~/Library/Application\ Support/Cursor/User/globalStorage/mcp
+```
+
+**設定ファイル (`mcp-servers.json`):**
+```json
+{
+  "mcpServers": {
+    "aws-remote-mcp": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-cli", "https://your-api-gateway-url/mcp"],
+      "env": {
+        "JWT_TOKEN": "YOUR_JWT_TOKEN"
+      }
+    }
+  }
+}
+```
+
+### 4.3 自動化スクリプト
+
+`scripts/test-mcp-registration.sh`を使用して、MCP登録の完全なフローを自動化できます：
+
+```bash
+# API Gateway URLを設定
+export API_URL="https://your-api-gateway-url"
+
+# スクリプトを実行
+./scripts/test-mcp-registration.sh
+```
+
+このスクリプトは以下を自動実行します：
+1. クライアント登録
+2. JWTトークン取得
+3. MCP初期化テスト
+4. Claude Desktop/Cursor設定例の生成
+5. クリーンアップ
+
+## 5. デプロイ手順
+
+### 5.1 依存関係のインストール
 
 ```bash
 npm install
 ```
 
-### 4.2 CDKブートストラップ（初回のみ）
+### 5.2 CDKブートストラップ（初回のみ）
 
 ```bash
 npx cdk bootstrap
 ```
 
-### 4.3 デプロイ
+### 5.3 デプロイ
 
 ```bash
 npx cdk deploy
 ```
 
-### 4.4 デプロイ後の確認
+### 5.4 デプロイ後の確認
 
 ```bash
 # スタックの出力を確認
@@ -701,9 +909,9 @@ npx cdk list
 npx cdk describe RemoteMcpServerStack
 ```
 
-## 5. 使用方法
+## 6. 使用方法
 
-### 5.1 クライアント登録（DCR）
+### 6.1 クライアント登録（DCR）
 
 ```bash
 curl -X POST https://your-api-gateway-url/dcr \
@@ -716,7 +924,16 @@ curl -X POST https://your-api-gateway-url/dcr \
   }'
 ```
 
-### 5.2 MCPリクエスト
+### 6.2 JWTトークン取得
+
+```bash
+curl -X POST https://your-api-gateway-url/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -H "Authorization: Basic BASE64_ENCODED_CREDENTIALS" \
+  -d "grant_type=client_credentials"
+```
+
+### 6.3 MCPリクエスト
 
 ```bash
 curl -X POST https://your-api-gateway-url/mcp \
@@ -737,25 +954,25 @@ curl -X POST https://your-api-gateway-url/mcp \
   }'
 ```
 
-## 6. セキュリティ考慮事項
+## 7. セキュリティ考慮事項
 
-### 6.1 本番環境での設定
+### 7.1 本番環境での設定
 
 - JWT_SECRETをAWS Secrets Managerで管理
 - DynamoDBテーブルの暗号化を有効化
 - API GatewayでWAFを設定
 - CloudTrailでAPI呼び出しをログ記録
 
-### 6.2 追加のセキュリティ対策
+### 7.2 追加のセキュリティ対策
 
 - レート制限の実装
 - IPアドレス制限
 - クライアント証明書認証
 - 監査ログの実装
 
-## 7. 監視とログ
+## 8. 監視とログ
 
-### 7.1 CloudWatch設定
+### 8.1 CloudWatch設定
 
 ```typescript
 // lib/remote-mcpserver-stack.ts に追加
@@ -767,7 +984,7 @@ const logGroup = new logs.LogGroup(this, 'McpLogGroup', {
 mcpHandler.addEnvironment('LOG_GROUP_NAME', logGroup.logGroupName);
 ```
 
-### 7.2 アラーム設定
+### 8.2 アラーム設定
 
 ```typescript
 // エラー率アラーム
@@ -779,9 +996,9 @@ new cloudwatch.Alarm(this, 'McpErrorAlarm', {
 });
 ```
 
-## 8. テスト
+## 9. テスト
 
-### 8.1 単体テスト
+### 9.1 単体テスト
 
 ```bash
 npm install -D jest @types/jest
@@ -798,7 +1015,7 @@ describe('McpHandler', () => {
 });
 ```
 
-### 8.2 統合テスト
+### 9.2 統合テスト
 
 ```bash
 # API Gatewayのエンドポイントをテスト
@@ -807,30 +1024,40 @@ curl -X POST https://your-api-gateway-url/dcr \
   -d '{"client_name": "Test Client"}'
 ```
 
-## 9. トラブルシューティング
+### 9.3 MCP登録テスト
 
-### 9.1 よくある問題
+```bash
+# 完全なMCP登録フローをテスト
+./scripts/test-mcp-registration.sh
+```
+
+## 10. トラブルシューティング
+
+### 10.1 よくある問題
 
 1. **CORSエラー**: API GatewayのCORS設定を確認
 2. **権限エラー**: Lambda関数のIAMロールを確認
 3. **タイムアウト**: Lambda関数のタイムアウト設定を調整
 4. **メモリ不足**: Lambda関数のメモリ設定を増加
+5. **認証エラー**: JWTトークンが正しく設定されているか確認
+6. **接続エラー**: API Gateway URLが正しいか確認
 
-### 9.2 ログ確認
+### 10.2 ログ確認
 
 ```bash
 # CloudWatchログを確認
 aws logs tail /aws/lambda/remote-mcpserver-stack-McpHandler --follow
 ```
 
-## 10. 次のステップ
+## 11. 次のステップ
 
 1. MCPプロトコルの完全実装
 2. ツールとリソースの実装
 3. エラーハンドリングの改善
 4. パフォーマンス最適化
 5. セキュリティ強化
+6. Claude Desktop/Cursorとの統合テスト
 
 ---
 
-このドキュメントに従って実装することで、AWS LambdaとAPI Gatewayを使用したリモートMCPサーバーを構築できます。RFC 7591 Dynamic Client Registrationによる認可機能も含まれており、セキュアなMCPサーバーとして運用できます。
+このドキュメントに従って実装することで、AWS LambdaとAPI Gatewayを使用したリモートMCPサーバーを構築できます。RFC 7591 Dynamic Client Registrationによる認可機能も含まれており、Claude DesktopやCursorへの登録も可能です。

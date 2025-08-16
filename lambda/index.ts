@@ -2,6 +2,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { McpHandler } from './mcp-handler';
 import { DcrHandler } from './dcr-handler';
 import { ClientHandler } from './client-handler';
+import { TokenHandler } from './token-handler';
 
 export const handler = async (
   event: APIGatewayProxyEvent
@@ -17,6 +18,8 @@ export const handler = async (
       return await McpHandler.handle(event);
     } else if (path === '/dcr' && method === 'POST') {
       return await DcrHandler.handle(event);
+    } else if (path === '/token' && method === 'POST') {
+      return await TokenHandler.handle(event);
     } else if (path.startsWith('/clients/') && method === 'GET') {
       return await ClientHandler.get(event);
     } else if (path.startsWith('/clients/') && method === 'DELETE') {
