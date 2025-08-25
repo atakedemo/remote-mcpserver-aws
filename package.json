@@ -1,25 +1,27 @@
 {
   "name": "remote-mcpserver-aws",
   "version": "1.0.0",
-  "description": "AWS Lambda and API Gateway based Remote MCP Server with DCR support",
+  "description": "AWS Amplify Gen2 based Remote MCP Server with User Authentication",
   "main": "index.js",
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
     "test": "jest",
-    "cdk": "cdk",
-    "deploy": "cdk deploy",
-    "destroy": "cdk destroy",
-    "diff": "cdk diff",
-    "synth": "cdk synth"
+    "amplify": "amplify",
+    "deploy": "amplify push",
+    "destroy": "amplify delete",
+    "diff": "amplify status",
+    "synth": "amplify sandbox"
   },
   "keywords": [
     "mcp",
     "aws",
+    "amplify",
     "lambda",
     "api-gateway",
-    "cdk",
-    "typescript"
+    "typescript",
+    "oauth2.1",
+    "authentication"
   ],
   "author": "",
   "license": "MIT",
@@ -30,17 +32,14 @@
     "@types/jsonwebtoken": "^9.0.5",
     "@types/node": "^20.8.10",
     "@types/uuid": "^9.0.7",
-    "aws-cdk": "^2.108.1",
-    "aws-cdk-lib": "^2.108.1",
-    "constructs": "^10.3.0",
-    "esbuild": "^0.19.8",
     "jest": "^29.7.0",
     "ts-jest": "^29.1.1",
     "typescript": "^5.2.2"
   },
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.450.0",
-    "@aws-sdk/lib-dynamodb": "^3.450.0",
+    "@aws-amplify/backend": "^0.10.0",
+    "@aws-amplify/amplify-api-next-alpha": "^0.10.0",
+    "aws-amplify": "^6.0.0",
     "crypto-js": "^4.2.0",
     "jsonwebtoken": "^9.0.2",
     "uuid": "^9.0.1"
